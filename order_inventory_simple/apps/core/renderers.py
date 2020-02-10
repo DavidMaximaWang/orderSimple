@@ -1,7 +1,7 @@
-import json
+import simplejson as json #https://stackoverflow.com/questions/1960516/python-json-serialize-a-decimal-object
+from decimal import Decimal
 from rest_framework.renderers import JSONRenderer
 from rest_framework.utils.serializer_helpers import ReturnList
-
 
 class OrderInventoryJSONRenderer(JSONRenderer):
     charset = 'utf-8'
@@ -23,4 +23,4 @@ class OrderInventoryJSONRenderer(JSONRenderer):
         if errors is not None:
             return super(OrderInventoryJSONRenderer, self).render(data)
 
-        return json.dumps({self.label: data})
+        return json.dumps({self.label: data}, use_decimal=True)

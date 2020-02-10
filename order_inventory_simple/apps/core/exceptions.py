@@ -21,10 +21,12 @@ def core_exception_handler(exc, context):
         return response    
 
 def _handle_generic_error(exc, context, response):
-    response.data = {
-        'errors': response.data
-    }
+    if response:
+        response.data = {
+            'errors': response.data
+        }
     return response
+   
 
 
 def _handle_not_found_error(exc, context, response):

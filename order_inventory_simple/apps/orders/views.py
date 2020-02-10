@@ -2,14 +2,15 @@ from django.shortcuts import render
 
 from rest_framework import serializers, status, generics, mixins, viewsets
 from rest_framework.response import Response
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.views import APIView
 from django.db import transaction
 
-from .models import Order
+from .models import Order, OrderedItem
 from . import models
 from ..inventories.models import Inventory
 from ..inventories.serializers import InventorySerializer
-from .serializers import OrderSerializer
+from .serializers import OrderSerializer, OrderDetailedSerializer, OrderedItemCreateSerializer
 from .renderers import OrderJSONRenderer
 
 
@@ -18,85 +19,82 @@ class OrderViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,   mixins.Retr
     queryset = Order.objects.all()
     renderer_classes = (OrderJSONRenderer,)
     serializer_class = OrderSerializer
+    read_serializer_class = OrderDetailedSerializer
 
     def create(self, request):
         try:
-            with transaction.atomic():
-                inventory_id = request.data.get("inventory_id")
-                inventory = Inventory.objects.get(pk=inventory_id)
+            serializer_context = {'request': request, "create": True}
+            write_serializer = self.serializer_class(data=request.data, context=serializer_context)
 
-                serializer_data = request.data
-                if request.data.get("status", True):
-                    inventory.quantity = inventory.quantity - \
-                        request.data.get("quantity",1)
-                    inventory.save()
-
-                #put inventory pk to serialized data
-                serializer_data["inventory"] = inventory.pk
-
-                serializer = self.serializer_class(data=serializer_data)
-
-                serializer.is_valid(raise_exception=True)
-                serializer.save()
-
-                return Response({**serializer.data,
-                                 "inventory_id": inventory.pk,
-                                 "inventory": InventorySerializer(inventory).data},
-                                status=status.HTTP_201_CREATED)
+            write_serializer.is_valid(raise_exception=True)
+            write_serializer.save()
+            read_serializer = self.read_serializer_class(write_serializer.instance, context=serializer_context)
         except Exception as e:
-            if inventory and inventory.quantity < 0:
-                raise serializers.ValidationError(
-                    'Not enough quantity, product quantity is less than  ' + str(request.data.get("quantity")))
-            else:
-                raise serializers.ValidationError(
-                    'Unknown error, the Order is not created')
+            a= type(e)
+            raise e
+        return Response(read_serializer.data, status=status.HTTP_201_CREATED)
+
 
     def update(self, request, pk):
         try:
-            with transaction.atomic():
-                serializer_instance = self.queryset.get(pk=pk)
-                prev_quantity = serializer_instance.quantity
-                prev_status = serializer_instance.status
-                curr_status = request.data.get("status", True)
-                curr_quantity = request.data.get("quantity")
+            serializer_instance = self.queryset.get(pk=pk)
+        except Order.DoesNotExist:
+            raise NotFound("Not found an order with this order id")   
 
-                inventory = serializer_instance.inventory
+        serializer_context = {'request': request, "update": True}
+        
+        
+        serializer = self.serializer_class(
+            serializer_instance, data=request.data, context=serializer_context, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
 
-                if prev_status == curr_status and prev_quantity == curr_quantity:
-                    pass
-                else:
-                    quantity_diff = prev_quantity * prev_status - curr_quantity * curr_status
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
-                    if quantity_diff != 0:  # product quantity changed, update the inventory
-                        inventory.quantity = inventory.quantity + quantity_diff
-                        inventory.save()
-
-                serializer = self.serializer_class(
-                    serializer_instance, data=request.data, partial=True)
-                serializer.is_valid(raise_exception=True)
-                serializer.save()
-
-                return Response(serializer.data, status=status.HTTP_200_OK)
-        except Exception as e:
-            if inventory and inventory.quantity <= 0:
-                raise serializers.ValidationError(
-                    'Not enough quantity, product quantity is less than  ' + str(request.data.get("quantity")))
-            else:
-                raise serializers.ValidationError(
-                    'Unknown error, the Order is not updated')
 
     def destroy(self, request, pk):
         try:
-            with transaction.atomic():
-                serializer_instance = self.queryset.get(pk=pk)
+            serializer_instance = self.queryset.get(pk=pk)
+        except Order.DoesNotExist:
+            raise NotFound("Not found an order with this order id")
+        serializer_instance.ordered_items.all().delete() #trigger the pre_delete to update the inventory
+        serializer_instance.delete()
+  
+        return Response(None, status=status.HTTP_204_NO_CONTENT)
 
-                inventory = serializer_instance.inventory
-                order_quantity = serializer_instance.quantity
-                inventory.quantity = inventory.quantity + order_quantity
-                inventory.save()
-                serializer_instance.delete()
-                import time
-                time.sleep(1)  # prevent [Errno 104] Connection reset by peer
-                return Response(None, status=status.HTTP_204_NO_CONTENT)
-        except Exception as e:
-            raise NotFound('Order is not deleted')
+
+class OrderItemAPIView(APIView):
+    serializer_class = OrderSerializer
+
+    def delete(self, request,  order_id=None):
+        serializer_context = {'request': request}
+
+        try:
+            order = Order.objects.get(id=order_id)
+        except Order.DoesNotExist:
+            raise NotFound("Not found an order with this order id")
+        except OrderedItem.DoesNotExist:
+            raise NotFound("Not found an order item with this ordered item id")
+
+        order.remove_order_item(request.data.get('item_id', None))
+
+        serializer = self.serializer_class(order, context=serializer_context)
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, order_id=None):
+        serializer_context = {'request': request}
+
+        try:
+            order = Order.objects.get(id=order_id)
+            product = Inventory.objects.get(id=request.data.get('product', None))
+            request.data['product' ]= product
+        except Order.DoesNotExist:
+            raise NotFound("Not found an order with this order id")
+        except Inventory.DoesNotExist:
+            raise NotFound("Not found a product with this product id")
+           
+        order.add_order_item(request.data)
+        serializer = self.serializer_class(order, context=serializer_context)
+
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
